@@ -2,6 +2,8 @@
 
 A lightweight terminal interface for conversational [Codex](https://openai.com/index/openai-codex/) sessions. Single-shot queries or interactive REPL, with streaming output, animated reasoning display, command approval, and configurable sandboxing.
 
+A lightweight alternative to [GitHub Copilot CLI](https://cli.github.com/) or [tAI](https://github.com/bjarneo/tAI) — no external API keys needed, just reuse your existing Codex subscription.
+
 ![screenshot](screenshot.png)
 
 ## Prerequisites
