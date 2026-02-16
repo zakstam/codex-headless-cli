@@ -10,7 +10,7 @@ A lightweight terminal interface for conversational [Codex](https://openai.com/i
 ## Install
 
 ```sh
-git clone https://github.com/zakstam/codex-headless-cli.git && cd codex-headless-cli && npm install && npm run build && npm link
+curl -fsSL https://raw.githubusercontent.com/zakstam/codex-headless-cli/main/install.sh | bash
 ```
 
 This makes `zz` available globally. On first run it launches a setup wizard.
