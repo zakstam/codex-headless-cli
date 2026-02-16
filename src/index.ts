@@ -7,10 +7,10 @@ import { runSingleShot } from "./single-shot.js";
 import { runRepl } from "./repl.js";
 import { printError } from "./ui.js";
 
-// Safety net: always restore terminal state on exit (show cursor, reset scroll region)
+// Safety net: always show cursor on exit
 process.on("exit", () => {
   try {
-    stdout.write("\x1b[?25h\x1b[r");
+    stdout.write("\x1b[?25h");
   } catch {
     // stdout may already be closed
   }
