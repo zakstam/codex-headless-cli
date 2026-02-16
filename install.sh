@@ -14,6 +14,7 @@ git clone --depth 1 "$REPO" "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 npm install --ignore-scripts
 npm run build
+chmod +x dist/index.js
 
 # Link globally (may need sudo)
 npm link 2>/dev/null || sudo npm link
