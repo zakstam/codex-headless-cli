@@ -2,6 +2,8 @@
 
 A lightweight terminal interface for conversational [Codex](https://openai.com/index/openai-codex/) sessions. Single-shot queries or interactive REPL, with streaming output, animated reasoning display, command approval, and configurable sandboxing.
 
+![screenshot](screenshot.png)
+
 ## Prerequisites
 
 - **Node.js** >= 18
