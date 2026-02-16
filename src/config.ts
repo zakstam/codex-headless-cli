@@ -147,8 +147,14 @@ export async function createConfig(): Promise<Config> {
     ...(codexBin ? { codexBin } : {}),
   };
 
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
-  console.log(`Config saved to ${CONFIG_PATH}`);
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+    console.log(`Config saved to ${CONFIG_PATH}`);
+  } catch (error) {
+    console.error(
+      `Failed to save config to ${CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return config;
 }

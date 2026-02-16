@@ -84,7 +84,12 @@ export class MarkdownWriter {
     }
 
     // Everything else — render through marked-terminal
-    const rendered = (marked.parse(line + "\n") as string).replace(/\n+$/, "");
+    let rendered: string;
+    try {
+      rendered = (marked.parse(line + "\n") as string).replace(/\n+$/, "");
+    } catch {
+      rendered = line;
+    }
     if (rendered.length > 0) {
       stdout.write(rendered + "\n");
     } else {

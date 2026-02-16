@@ -14,7 +14,12 @@ type ProtocolResponse = {
 };
 
 export function parseServerMessage(payloadJson: string): unknown {
-  return JSON.parse(payloadJson) as unknown;
+  try {
+    return JSON.parse(payloadJson) as unknown;
+  } catch {
+    console.error(`Failed to parse server message: ${payloadJson.slice(0, 200)}`);
+    return null;
+  }
 }
 
 export function isServerNotification(

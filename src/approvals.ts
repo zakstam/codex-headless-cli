@@ -98,15 +98,22 @@ export async function handleApproval(
 
   // Prompt mode — show full details and ask
   console.log(chalk.yellow(`\n  [approval required] `) + description);
-  const { default: inquirer } = await import("inquirer");
-  const { approved } = await inquirer.prompt([
-    {
-      type: "confirm",
-      name: "approved",
-      message: "Approve this action?",
-      default: true,
-    },
-  ]);
+  let approved = false;
+  try {
+    const { default: inquirer } = await import("inquirer");
+    const answer = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "approved",
+        message: "Approve this action?",
+        default: true,
+      },
+    ]);
+    approved = answer.approved as boolean;
+  } catch {
+    // Prompt interrupted (e.g. Ctrl+C) — default to decline
+    console.log(chalk.red("  [declined] ") + "prompt interrupted");
+  }
 
   sendApprovalResponse(
     bridge,

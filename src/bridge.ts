@@ -65,6 +65,7 @@ export function createBridgeSession(config: Config): BridgeSession {
   let resolveTurnDone: (() => void) | null = null;
   let rejectTurnDone: ((error: Error) => void) | null = null;
 
+  let stopped = false;
   const reasoning = new ReasoningDisplay(config.debug);
   const waiting = new WaitingSpinner();
   const md = new MarkdownWriter();
@@ -76,9 +77,13 @@ export function createBridgeSession(config: Config): BridgeSession {
 
   function startKeyListener(): void {
     if (!stdin.isTTY) return;
-    stdinWasRaw = stdin.isRaw;
-    stdin.setRawMode(true);
-    stdin.resume();
+    try {
+      stdinWasRaw = stdin.isRaw;
+      stdin.setRawMode(true);
+      stdin.resume();
+    } catch {
+      return;
+    }
     lastCtrlC = 0;
     keyHandler = (data: Buffer) => {
       const byte = data[0];
@@ -104,24 +109,36 @@ export function createBridgeSession(config: Config): BridgeSession {
       stdin.off("data", keyHandler);
       keyHandler = null;
     }
-    if (stdin.isTTY && stdin.isRaw !== stdinWasRaw) {
-      stdin.setRawMode(stdinWasRaw);
+    try {
+      if (stdin.isTTY && stdin.isRaw !== stdinWasRaw) {
+        stdin.setRawMode(stdinWasRaw);
+      }
+      stdin.pause();
+    } catch {
+      // stdin may already be closed
     }
-    stdin.pause();
   }
 
   function pauseKeyListener(): void {
     if (!keyHandler) return;
     stdin.off("data", keyHandler);
-    if (stdin.isTTY && stdin.isRaw) {
-      stdin.setRawMode(false);
+    try {
+      if (stdin.isTTY && stdin.isRaw) {
+        stdin.setRawMode(false);
+      }
+    } catch {
+      // stdin may already be closed
     }
   }
 
   function resumeKeyListener(): void {
     if (!keyHandler || !stdin.isTTY) return;
-    stdin.setRawMode(true);
-    stdin.resume();
+    try {
+      stdin.setRawMode(true);
+      stdin.resume();
+    } catch {
+      return;
+    }
     stdin.on("data", keyHandler);
   }
 
@@ -241,12 +258,18 @@ export function createBridgeSession(config: Config): BridgeSession {
           reasoning.pause();
           pauseKeyListener();
 
-          await handleApproval(
-            bridge,
-            event.kind,
-            event.payloadJson,
-            config.approvalMode,
-          );
+          try {
+            await handleApproval(
+              bridge,
+              event.kind,
+              event.payloadJson,
+              config.approvalMode,
+            );
+          } catch (error) {
+            printError(
+              `Approval error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
 
           resumeKeyListener();
           reasoning.resume();
@@ -454,6 +477,8 @@ export function createBridgeSession(config: Config): BridgeSession {
   }
 
   function stop(): void {
+    if (stopped) return;
+    stopped = true;
     waiting.stop();
     reasoning.stop();
     stopKeyListener();

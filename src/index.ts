@@ -16,6 +16,24 @@ process.on("exit", () => {
   }
 });
 
+// Global error handlers — prevent silent crashes
+process.on("unhandledRejection", (reason) => {
+  printError(
+    `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
+  );
+  process.exit(1);
+});
+
+process.on("uncaughtException", (error) => {
+  printError(`Uncaught exception: ${error.message}`);
+  process.exit(1);
+});
+
+// Graceful shutdown on SIGTERM (e.g. from process managers)
+process.on("SIGTERM", () => {
+  process.exit(0);
+});
+
 function codexBinaryExists(bin?: string): boolean {
   const target = bin ?? "codex";
   try {
