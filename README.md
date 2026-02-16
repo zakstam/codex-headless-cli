@@ -8,6 +8,7 @@ A lightweight terminal interface for conversational [Codex](https://openai.com/i
 
 - **Node.js** >= 18
 - **Codex CLI** binary installed and on your `PATH` ([install instructions](https://github.com/openai/codex))
+- **Logged in to Codex CLI** — run `codex login` before using zz
 
 ## Install
 
@@ -55,7 +56,7 @@ Stored at `~/.config/zz/config.json`. Created automatically on first run or with
 
 ```jsonc
 {
-  "model": "o3-mini",              // model name (fetched from codex on setup)
+  "model": "GPT-5.3-Codex-Spark",  // model name (fetched from codex on setup)
   "approvalMode": "prompt",        // "auto-approve" | "prompt" | "deny"
   "sandbox": "workspace-write",    // "read-only" | "workspace-write" | "full-access"
   "reasoningOnly": false,          // true = show thinking, omit response text
