@@ -16,11 +16,6 @@ npm install --ignore-scripts
 npm run build
 
 # Link globally (may need sudo)
-if npm link 2>/dev/null; then
-  echo ""
-else
-  echo "Linking requires elevated permissions..."
-  sudo npm link
-fi
+npm link 2>/dev/null || sudo npm link
 
 echo "Done! Run 'zz' to get started."
