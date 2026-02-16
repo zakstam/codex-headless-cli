@@ -10,14 +10,13 @@ import {
   isServerNotification,
 } from "./protocol.js";
 import {
-  writeAssistantDelta,
   writeCommandOutput,
   writeDebugTag,
-  finishAssistantOutput,
   printError,
   ReasoningDisplay,
   WaitingSpinner,
 } from "./ui.js";
+import { MarkdownWriter } from "./markdown.js";
 import { handleApproval } from "./approvals.js";
 import type { Config } from "./config.js";
 
@@ -68,6 +67,7 @@ export function createBridgeSession(config: Config): BridgeSession {
 
   const reasoning = new ReasoningDisplay(config.debug);
   const waiting = new WaitingSpinner();
+  const md = new MarkdownWriter();
 
   // --- Key listener for interrupt during turns ---
   let keyHandler: ((data: Buffer) => void) | null = null;
@@ -216,7 +216,7 @@ export function createBridgeSession(config: Config): BridgeSession {
               writeDebugTag("response");
             }
           }
-          writeAssistantDelta(delta);
+          md.addDelta(delta);
           return;
         }
 
@@ -265,7 +265,7 @@ export function createBridgeSession(config: Config): BridgeSession {
           endReasoning();
           stopKeyListener();
           if (assistantLineOpen) {
-            finishAssistantOutput();
+            md.flush();
             assistantLineOpen = false;
           }
           resolveTurnDone?.();
@@ -329,7 +329,7 @@ export function createBridgeSession(config: Config): BridgeSession {
         endReasoning();
         stopKeyListener();
         if (assistantLineOpen) {
-          finishAssistantOutput();
+          md.flush();
           assistantLineOpen = false;
         }
         printError(`protocol: ${error.message}`);
@@ -343,6 +343,10 @@ export function createBridgeSession(config: Config): BridgeSession {
         waiting.stop();
         endReasoning();
         stopKeyListener();
+        if (assistantLineOpen) {
+          md.flush();
+          assistantLineOpen = false;
+        }
         if (turnInFlight && !turnSettled) {
           const error = new Error(
             `codex app-server exited unexpectedly (code=${String(code)})`,
@@ -415,6 +419,7 @@ export function createBridgeSession(config: Config): BridgeSession {
     commandOutputOpen = false;
     gotFirstToken = false;
     reasoningStarted = false;
+    md.reset();
 
     waiting.start();
     startKeyListener();
