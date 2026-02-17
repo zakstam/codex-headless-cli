@@ -2,7 +2,6 @@ import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
-import { stdout } from "node:process";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 marked.use(markedTerminal() as any);
@@ -11,8 +10,12 @@ marked.use(markedTerminal() as any);
  * Streaming markdown renderer for terminal output.
  *
  * Accumulates streaming deltas until a newline, then renders each complete
- * line. Code blocks are tracked across lines and rendered with a gutter;
- * everything else is rendered through marked + marked-terminal.
+ * line with terminal formatting. Code blocks are tracked across lines and
+ * rendered with a gutter + syntax highlighting; everything else goes through
+ * marked + marked-terminal.
+ *
+ * Rendered lines are delivered via the `onLine` callback instead of writing
+ * directly to stdout, making this compatible with Ink's rendering model.
  */
 export class MarkdownWriter {
   private buffer = "";
@@ -20,6 +23,11 @@ export class MarkdownWriter {
   private codeBlockFenceChar = "";
   private codeBlockFenceLen = 0;
   private codeBlockLang = "";
+  private readonly onLine: (rendered: string) => void;
+
+  constructor(onLine: (rendered: string) => void) {
+    this.onLine = onLine;
+  }
 
   /** Append streaming delta text, rendering complete lines as they arrive. */
   addDelta(text: string): void {
@@ -38,7 +46,11 @@ export class MarkdownWriter {
       this.processLine(this.buffer);
       this.buffer = "";
     }
-    stdout.write("\n");
+  }
+
+  /** Return the current partial-line buffer (for live display). */
+  getBuffer(): string {
+    return this.buffer;
   }
 
   /** Reset state for a new turn. */
@@ -65,13 +77,13 @@ export class MarkdownWriter {
         const label = this.codeBlockLang
           ? chalk.dim.italic(` ${this.codeBlockLang} `)
           : "";
-        stdout.write(chalk.dim("  ┌──") + label + "\n");
+        this.onLine(chalk.dim("  ┌──") + label);
         return;
       }
 
       if (char === this.codeBlockFenceChar && len >= this.codeBlockFenceLen) {
         this.inCodeBlock = false;
-        stdout.write(chalk.dim("  └──") + "\n");
+        this.onLine(chalk.dim("  └──"));
         return;
       }
     }
@@ -79,7 +91,7 @@ export class MarkdownWriter {
     // Inside code block — syntax highlight + gutter
     if (this.inCodeBlock) {
       const highlighted = highlightLine(line, this.codeBlockLang);
-      stdout.write(chalk.dim("  │ ") + highlighted + "\n");
+      this.onLine(chalk.dim("  │ ") + highlighted);
       return;
     }
 
@@ -90,11 +102,7 @@ export class MarkdownWriter {
     } catch {
       rendered = line;
     }
-    if (rendered.length > 0) {
-      stdout.write(rendered + "\n");
-    } else {
-      stdout.write("\n");
-    }
+    this.onLine(rendered);
   }
 }
 

@@ -1,6 +1,12 @@
-import { stdin } from "node:process";
 import { CodexLocalBridge } from "@zakstam/codex-local-component/host";
-import type { ClientNotification, ClientRequest } from "@zakstam/codex-local-component/protocol";
+import {
+  buildCommandExecutionApprovalResponse,
+  buildFileChangeApprovalResponse,
+} from "@zakstam/codex-local-component/host";
+import type {
+  ClientNotification,
+  ClientRequest,
+} from "@zakstam/codex-local-component/protocol";
 import {
   extractDelta,
   EventKind,
@@ -9,15 +15,8 @@ import {
   isResponse,
   isServerNotification,
 } from "./protocol.js";
-import {
-  writeCommandOutput,
-  writeDebugTag,
-  printError,
-  ReasoningDisplay,
-  WaitingSpinner,
-} from "./ui.js";
-import { MarkdownWriter } from "./markdown.js";
-import { handleApproval } from "./approvals.js";
+import { parseApprovalPayload } from "./approvals.js";
+import type { AppEventBus } from "./events.js";
 import type { Config } from "./config.js";
 
 export type BridgeSession = {
@@ -49,7 +48,10 @@ function toProtocolSandbox(
   }
 }
 
-export function createBridgeSession(config: Config): BridgeSession {
+export function createBridgeSession(
+  config: Config,
+  bus: AppEventBus,
+): BridgeSession {
   let nextId = 1;
   let threadId: string | null = null;
   let turnId: string | null = null;
@@ -66,81 +68,6 @@ export function createBridgeSession(config: Config): BridgeSession {
   let rejectTurnDone: ((error: Error) => void) | null = null;
 
   let stopped = false;
-  const reasoning = new ReasoningDisplay(config.debug);
-  const waiting = new WaitingSpinner();
-  const md = new MarkdownWriter();
-
-  // --- Key listener for interrupt during turns ---
-  let keyHandler: ((data: Buffer) => void) | null = null;
-  let stdinWasRaw = false;
-  let lastCtrlC = 0;
-
-  function startKeyListener(): void {
-    if (!stdin.isTTY) return;
-    try {
-      stdinWasRaw = stdin.isRaw;
-      stdin.setRawMode(true);
-      stdin.resume();
-    } catch {
-      return;
-    }
-    lastCtrlC = 0;
-    keyHandler = (data: Buffer) => {
-      const byte = data[0];
-      if (byte === 0x69) {
-        // 'i' key — interrupt turn
-        interruptTurn();
-      } else if (byte === 0x03) {
-        // Ctrl+C — interrupt turn, or force exit on double-press
-        const now = Date.now();
-        if (now - lastCtrlC < 1000) {
-          stop();
-          process.exit(130);
-        }
-        lastCtrlC = now;
-        interruptTurn();
-      }
-    };
-    stdin.on("data", keyHandler);
-  }
-
-  function stopKeyListener(): void {
-    if (keyHandler) {
-      stdin.off("data", keyHandler);
-      keyHandler = null;
-    }
-    try {
-      if (stdin.isTTY && stdin.isRaw !== stdinWasRaw) {
-        stdin.setRawMode(stdinWasRaw);
-      }
-      stdin.pause();
-    } catch {
-      // stdin may already be closed
-    }
-  }
-
-  function pauseKeyListener(): void {
-    if (!keyHandler) return;
-    stdin.off("data", keyHandler);
-    try {
-      if (stdin.isTTY && stdin.isRaw) {
-        stdin.setRawMode(false);
-      }
-    } catch {
-      // stdin may already be closed
-    }
-  }
-
-  function resumeKeyListener(): void {
-    if (!keyHandler || !stdin.isTTY) return;
-    try {
-      stdin.setRawMode(true);
-      stdin.resume();
-    } catch {
-      return;
-    }
-    stdin.on("data", keyHandler);
-  }
 
   type PendingRequest = { method: string };
   const pendingRequests = new Map<number, PendingRequest>();
@@ -163,13 +90,29 @@ export function createBridgeSession(config: Config): BridgeSession {
   function onFirstToken(): void {
     if (!gotFirstToken) {
       gotFirstToken = true;
-      waiting.stop();
+      bus.emitApp({ type: "waiting-stop" });
     }
   }
 
-  /** Transition from reasoning to response output. */
-  function endReasoning(): void {
-    reasoning.stop();
+  function cleanupTurn(): void {
+    bus.emitApp({ type: "turn-complete" });
+  }
+
+  /** Send an approval decision back through the protocol. */
+  function sendApprovalDecision(
+    kind: string,
+    approvalRequestId: number | string,
+    decision: "accept" | "decline",
+  ): void {
+    if (kind === "item/commandExecution/requestApproval") {
+      bridge.send(
+        buildCommandExecutionApprovalResponse(approvalRequestId, decision),
+      );
+    } else if (kind === "item/fileChange/requestApproval") {
+      bridge.send(
+        buildFileChangeApprovalResponse(approvalRequestId, decision),
+      );
+    }
   }
 
   const bridge = new CodexLocalBridge(
@@ -182,6 +125,7 @@ export function createBridgeSession(config: Config): BridgeSession {
         // Thread started
         if (event.kind === EventKind.ThreadStarted && threadId === null) {
           threadId = event.threadId;
+          bus.emitApp({ type: "thread-ready", threadId });
           resolveThreadReady?.(threadId);
           resolveThreadReady = null;
           rejectThreadReady = null;
@@ -189,28 +133,31 @@ export function createBridgeSession(config: Config): BridgeSession {
         }
 
         // Turn started
-        if (event.kind === EventKind.TurnStarted && event.turnId && turnId === null) {
+        if (
+          event.kind === EventKind.TurnStarted &&
+          event.turnId &&
+          turnId === null
+        ) {
           turnId = event.turnId;
           return;
         }
 
-        // Reasoning deltas — animated single-line display
+        // Reasoning deltas
         if (REASONING_EVENT_KINDS.has(event.kind)) {
           onFirstToken();
 
           if (!reasoningStarted) {
             reasoningStarted = true;
-            reasoning.start();
           }
 
           if (event.kind === EventKind.ReasoningSectionBreak) {
-            reasoning.sectionBreak();
+            bus.emitApp({ type: "reasoning-section-break" });
             return;
           }
 
           const delta = extractDelta(event.payloadJson);
           if (delta) {
-            reasoning.addDelta(delta);
+            bus.emitApp({ type: "reasoning-delta", delta });
           }
           return;
         }
@@ -230,10 +177,10 @@ export function createBridgeSession(config: Config): BridgeSession {
           if (!assistantLineOpen) {
             assistantLineOpen = true;
             if (config.debug) {
-              writeDebugTag("response");
+              bus.emitApp({ type: "debug-tag", tag: "response" });
             }
           }
-          md.addDelta(delta);
+          bus.emitApp({ type: "response-delta", delta });
           return;
         }
 
@@ -245,34 +192,34 @@ export function createBridgeSession(config: Config): BridgeSession {
           if (delta) {
             if (config.debug && !commandOutputOpen) {
               commandOutputOpen = true;
-              writeDebugTag("command");
+              bus.emitApp({ type: "debug-tag", tag: "command" });
             }
-            writeCommandOutput(delta);
+            bus.emitApp({ type: "command-output-delta", delta });
           }
           return;
         }
 
-        // Approval requests — pause reasoning display and key listener so prompts work
+        // Approval requests
         if (APPROVAL_KINDS.has(event.kind)) {
           onFirstToken();
-          reasoning.pause();
-          pauseKeyListener();
 
-          try {
-            await handleApproval(
-              bridge,
-              event.kind,
-              event.payloadJson,
-              config.approvalMode,
-            );
-          } catch (error) {
-            printError(
-              `Approval error: ${error instanceof Error ? error.message : String(error)}`,
-            );
+          const payload = parseApprovalPayload(event.payloadJson);
+          if (!payload) {
+            return;
           }
 
-          resumeKeyListener();
-          reasoning.resume();
+          await new Promise<void>((resolve) => {
+            bus.emitApp({
+              type: "approval-request",
+              kind: event.kind,
+              payloadJson: event.payloadJson,
+              respond: (decision) => {
+                sendApprovalDecision(event.kind, payload.id, decision);
+                resolve();
+              },
+            });
+          });
+
           return;
         }
 
@@ -284,13 +231,7 @@ export function createBridgeSession(config: Config): BridgeSession {
           turnSettled = true;
           turnInFlight = false;
           turnId = null;
-          waiting.stop();
-          endReasoning();
-          stopKeyListener();
-          if (assistantLineOpen) {
-            md.flush();
-            assistantLineOpen = false;
-          }
+          cleanupTurn();
           resolveTurnDone?.();
           resolveTurnDone = null;
           rejectTurnDone = null;
@@ -321,15 +262,13 @@ export function createBridgeSession(config: Config): BridgeSession {
                 turnSettled = true;
                 turnInFlight = false;
                 turnId = null;
-                waiting.stop();
-                endReasoning();
-                stopKeyListener();
+                cleanupTurn();
                 rejectTurnDone?.(error);
                 resolveTurnDone = null;
                 rejectTurnDone = null;
                 return;
               }
-              printError(error.message);
+              bus.emitApp({ type: "error", message: error.message });
               return;
             }
           }
@@ -338,7 +277,10 @@ export function createBridgeSession(config: Config): BridgeSession {
 
         if (isServerNotification(message)) {
           if (message.method === "error") {
-            printError(`server: ${JSON.stringify(message.params)}`);
+            bus.emitApp({
+              type: "error",
+              message: `server: ${JSON.stringify(message.params)}`,
+            });
             return;
           }
           if (message.method === "account/rateLimits/updated") {
@@ -347,15 +289,12 @@ export function createBridgeSession(config: Config): BridgeSession {
         }
       },
 
-      onProtocolError: async ({ line, error }) => {
-        waiting.stop();
-        endReasoning();
-        stopKeyListener();
-        if (assistantLineOpen) {
-          md.flush();
-          assistantLineOpen = false;
-        }
-        printError(`protocol: ${error.message}`);
+      onProtocolError: async ({ error }) => {
+        cleanupTurn();
+        bus.emitApp({
+          type: "error",
+          message: `protocol: ${error.message}`,
+        });
         rejectThreadReady?.(error);
         rejectTurnDone?.(error);
         bridge.stop();
@@ -363,13 +302,7 @@ export function createBridgeSession(config: Config): BridgeSession {
       },
 
       onProcessExit: (code) => {
-        waiting.stop();
-        endReasoning();
-        stopKeyListener();
-        if (assistantLineOpen) {
-          md.flush();
-          assistantLineOpen = false;
-        }
+        cleanupTurn();
         if (turnInFlight && !turnSettled) {
           const error = new Error(
             `codex app-server exited unexpectedly (code=${String(code)})`,
@@ -442,10 +375,8 @@ export function createBridgeSession(config: Config): BridgeSession {
     commandOutputOpen = false;
     gotFirstToken = false;
     reasoningStarted = false;
-    md.reset();
 
-    waiting.start();
-    startKeyListener();
+    bus.emitApp({ type: "waiting-start" });
 
     return new Promise<void>((resolve, reject) => {
       resolveTurnDone = resolve;
@@ -465,7 +396,6 @@ export function createBridgeSession(config: Config): BridgeSession {
 
   function interruptTurn(): void {
     if (!threadId || !turnId || !turnInFlight) {
-      console.log("No active turn to interrupt.");
       return;
     }
     const interruptReq: ClientRequest = {
@@ -479,9 +409,6 @@ export function createBridgeSession(config: Config): BridgeSession {
   function stop(): void {
     if (stopped) return;
     stopped = true;
-    waiting.stop();
-    reasoning.stop();
-    stopKeyListener();
     bridge.stop();
   }
 

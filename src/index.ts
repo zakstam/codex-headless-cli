@@ -1,31 +1,20 @@
 #!/usr/bin/env node
 
 import { execSync } from "node:child_process";
-import { stdout } from "node:process";
 import { loadConfig, createConfig } from "./config.js";
 import { runSingleShot } from "./single-shot.js";
 import { runRepl } from "./repl.js";
-import { printError } from "./ui.js";
-
-// Safety net: always show cursor on exit
-process.on("exit", () => {
-  try {
-    stdout.write("\x1b[?25h");
-  } catch {
-    // stdout may already be closed
-  }
-});
 
 // Global error handlers — prevent silent crashes
 process.on("unhandledRejection", (reason) => {
-  printError(
-    `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
+  console.error(
+    `error: Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
   );
   process.exit(1);
 });
 
 process.on("uncaughtException", (error) => {
-  printError(`Uncaught exception: ${error.message}`);
+  console.error(`error: Uncaught exception: ${error.message}`);
   process.exit(1);
 });
 
@@ -64,14 +53,20 @@ async function main(): Promise<void> {
 
   if (!codexBinaryExists(config.codexBin)) {
     const bin = config.codexBin ?? "codex";
-    printError(
-      `codex binary not found: "${bin}". Install the codex CLI or set codexBin in config.`,
+    console.error(
+      `error: codex binary not found: "${bin}". Install the codex CLI or set codexBin in config.`,
     );
     process.exit(1);
   }
 
   const isDebug = args.includes("--debug");
-  const query = args.filter((a) => a !== "--debug").join(" ");
+  const isReasoningOnly = args.includes("--reasoning-only");
+  const flagsToStrip = new Set(["--debug", "--reasoning-only"]);
+  const query = args.filter((a) => !flagsToStrip.has(a)).join(" ");
+
+  if (isReasoningOnly) {
+    config.reasoningOnly = true;
+  }
 
   if (isDebug) {
     config.debug = true;
@@ -89,6 +84,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  printError(error instanceof Error ? error.message : String(error));
+  console.error(
+    `error: ${error instanceof Error ? error.message : String(error)}`,
+  );
   process.exit(1);
 });
