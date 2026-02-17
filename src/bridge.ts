@@ -16,25 +16,59 @@ import {
   isServerNotification,
 } from "./protocol.js";
 import { parseApprovalPayload } from "./approvals.js";
-import type { AppEventBus } from "./events.js";
+import { buildInitSequence } from "./bridge-init.js";
 import type { Config } from "./config.js";
 
-export type BridgeSession = {
-  bridge: CodexLocalBridge;
-  waitForThreadStart: () => Promise<string>;
-  runTurn: (text: string) => Promise<void>;
-  interruptTurn: () => void;
-  stop: () => void;
-};
+// ── AppEvent (moved from events.ts) ──────────────────────────────────────────
 
-/** Map our config approval mode to the codex protocol's AskForApproval. */
+export type AppEvent =
+  | { type: "thread-ready"; threadId: string }
+  | { type: "waiting-start" }
+  | { type: "waiting-stop" }
+  | { type: "reasoning-delta"; delta: string }
+  | { type: "reasoning-section-break" }
+  | { type: "response-delta"; delta: string }
+  | { type: "command-output-delta"; delta: string }
+  | {
+      type: "approval-request";
+      kind: string;
+      payloadJson: string;
+      respond: (decision: "accept" | "decline") => void;
+    }
+  | { type: "turn-complete" }
+  | { type: "error"; message: string }
+  | { type: "debug-tag"; tag: string };
+
+export type EventCallback = (event: AppEvent) => void;
+
+// ── State machines ───────────────────────────────────────────────────────────
+
+type ThreadState =
+  | { status: "init" }
+  | { status: "starting"; resolve: (id: string) => void; reject: (err: Error) => void }
+  | { status: "ready"; threadId: string };
+
+type TurnState =
+  | { status: "idle" }
+  | {
+      status: "active";
+      turnId: string | null;
+      gotFirstToken: boolean;
+      assistantLineOpen: boolean;
+      commandOutputOpen: boolean;
+      reasoningStarted: boolean;
+      resolve: () => void;
+      reject: (err: Error) => void;
+    };
+
+// ── Protocol helpers ─────────────────────────────────────────────────────────
+
 function toProtocolApprovalPolicy(
   mode: Config["approvalMode"],
 ): "never" | "untrusted" {
   return mode === "auto-approve" ? "never" : "untrusted";
 }
 
-/** Map our config sandbox mode to the protocol's SandboxMode. */
 function toProtocolSandbox(
   mode: Config["sandbox"],
 ): "read-only" | "workspace-write" | "danger-full-access" {
@@ -48,369 +82,354 @@ function toProtocolSandbox(
   }
 }
 
-export function createBridgeSession(
-  config: Config,
-  bus: AppEventBus,
-): BridgeSession {
-  let nextId = 1;
-  let threadId: string | null = null;
-  let turnId: string | null = null;
-  let turnInFlight = false;
-  let turnSettled = false;
-  let assistantLineOpen = false;
-  let commandOutputOpen = false;
-  let gotFirstToken = false;
-  let reasoningStarted = false;
+// ── BridgeSession class ──────────────────────────────────────────────────────
 
-  let resolveThreadReady: ((id: string) => void) | null = null;
-  let rejectThreadReady: ((error: Error) => void) | null = null;
-  let resolveTurnDone: (() => void) | null = null;
-  let rejectTurnDone: ((error: Error) => void) | null = null;
+export class BridgeSession {
+  readonly bridge: CodexLocalBridge;
+  private readonly config: Config;
 
-  let stopped = false;
+  private nextId = 1;
+  private threadState: ThreadState = { status: "init" };
+  private turnState: TurnState = { status: "idle" };
+  private stopped = false;
+  private eventCallback: EventCallback | null = null;
 
-  type PendingRequest = { method: string };
-  const pendingRequests = new Map<number, PendingRequest>();
+  private readonly pendingRequests = new Map<number, { method: string }>();
 
-  function requestId(): number {
-    return nextId++;
+  constructor(config: Config) {
+    this.config = config;
+
+    this.bridge = new CodexLocalBridge(
+      {
+        ...(config.codexBin ? { codexBin: config.codexBin } : {}),
+        cwd: process.cwd(),
+      },
+      {
+        onEvent: async (event) => this.handleEvent(event),
+        onGlobalMessage: async (message) => this.handleGlobalMessage(message),
+        onProtocolError: async ({ error }) => this.handleProtocolError(error),
+        onProcessExit: (code) => this.handleProcessExit(code),
+      },
+    );
   }
 
-  function sendMessage(
-    message: ClientRequest | ClientNotification,
-    trackedMethod?: string,
-  ): void {
-    bridge.send(message);
-    if ("id" in message && typeof message.id === "number" && trackedMethod) {
-      pendingRequests.set(message.id, { method: trackedMethod });
+  setEventCallback(cb: EventCallback): void {
+    this.eventCallback = cb;
+  }
+
+  private emit(event: AppEvent): void {
+    this.eventCallback?.(event);
+  }
+
+  // ── Public API ───────────────────────────────────────────────────────────
+
+  waitForThreadStart(): Promise<string> {
+    if (this.threadState.status === "ready") {
+      return Promise.resolve(this.threadState.threadId);
     }
-  }
+    this.bridge.start();
+    const [initReq, initialized] = buildInitSequence(() => this.requestId());
+    this.sendMessage(initReq, "initialize");
+    this.sendMessage(initialized);
 
-  /** Called on the very first content token of any kind for this turn. */
-  function onFirstToken(): void {
-    if (!gotFirstToken) {
-      gotFirstToken = true;
-      bus.emitApp({ type: "waiting-stop" });
-    }
-  }
-
-  function cleanupTurn(): void {
-    bus.emitApp({ type: "turn-complete" });
-  }
-
-  /** Send an approval decision back through the protocol. */
-  function sendApprovalDecision(
-    kind: string,
-    approvalRequestId: number | string,
-    decision: "accept" | "decline",
-  ): void {
-    if (kind === "item/commandExecution/requestApproval") {
-      bridge.send(
-        buildCommandExecutionApprovalResponse(approvalRequestId, decision),
-      );
-    } else if (kind === "item/fileChange/requestApproval") {
-      bridge.send(
-        buildFileChangeApprovalResponse(approvalRequestId, decision),
-      );
-    }
-  }
-
-  const bridge = new CodexLocalBridge(
-    {
-      ...(config.codexBin ? { codexBin: config.codexBin } : {}),
-      cwd: process.cwd(),
-    },
-    {
-      onEvent: async (event) => {
-        // Thread started
-        if (event.kind === EventKind.ThreadStarted && threadId === null) {
-          threadId = event.threadId;
-          bus.emitApp({ type: "thread-ready", threadId });
-          resolveThreadReady?.(threadId);
-          resolveThreadReady = null;
-          rejectThreadReady = null;
-          return;
-        }
-
-        // Turn started
-        if (
-          event.kind === EventKind.TurnStarted &&
-          event.turnId &&
-          turnId === null
-        ) {
-          turnId = event.turnId;
-          return;
-        }
-
-        // Reasoning deltas
-        if (REASONING_EVENT_KINDS.has(event.kind)) {
-          onFirstToken();
-
-          if (!reasoningStarted) {
-            reasoningStarted = true;
-          }
-
-          if (event.kind === EventKind.ReasoningSectionBreak) {
-            bus.emitApp({ type: "reasoning-section-break" });
-            return;
-          }
-
-          const delta = extractDelta(event.payloadJson);
-          if (delta) {
-            bus.emitApp({ type: "reasoning-delta", delta });
-          }
-          return;
-        }
-
-        // Assistant streaming delta
-        if (event.kind === EventKind.AgentMessageDelta) {
-          onFirstToken();
-
-          if (config.reasoningOnly) {
-            return;
-          }
-
-          const delta = extractDelta(event.payloadJson);
-          if (!delta) {
-            return;
-          }
-          if (!assistantLineOpen) {
-            assistantLineOpen = true;
-            if (config.debug) {
-              bus.emitApp({ type: "debug-tag", tag: "response" });
-            }
-          }
-          bus.emitApp({ type: "response-delta", delta });
-          return;
-        }
-
-        // Command execution output delta
-        if (event.kind === EventKind.CommandOutputDelta) {
-          onFirstToken();
-
-          const delta = extractDelta(event.payloadJson);
-          if (delta) {
-            if (config.debug && !commandOutputOpen) {
-              commandOutputOpen = true;
-              bus.emitApp({ type: "debug-tag", tag: "command" });
-            }
-            bus.emitApp({ type: "command-output-delta", delta });
-          }
-          return;
-        }
-
-        // Approval requests
-        if (APPROVAL_KINDS.has(event.kind)) {
-          onFirstToken();
-
-          const payload = parseApprovalPayload(event.payloadJson);
-          if (!payload) {
-            return;
-          }
-
-          await new Promise<void>((resolve) => {
-            bus.emitApp({
-              type: "approval-request",
-              kind: event.kind,
-              payloadJson: event.payloadJson,
-              respond: (decision) => {
-                sendApprovalDecision(event.kind, payload.id, decision);
-                resolve();
-              },
-            });
-          });
-
-          return;
-        }
-
-        // Turn completed
-        if (event.kind === EventKind.TurnCompleted) {
-          if (!turnInFlight || turnSettled) {
-            return;
-          }
-          turnSettled = true;
-          turnInFlight = false;
-          turnId = null;
-          cleanupTurn();
-          resolveTurnDone?.();
-          resolveTurnDone = null;
-          rejectTurnDone = null;
-          return;
-        }
-      },
-
-      onGlobalMessage: async (message) => {
-        if (isResponse(message)) {
-          if (typeof message.id === "number") {
-            const pending = pendingRequests.get(message.id);
-            pendingRequests.delete(message.id);
-            if (message.error) {
-              const error = new Error(
-                `Request failed (${pending?.method ?? "unknown"}): ${message.error.message} (${message.error.code})`,
-              );
-              if (pending?.method === "thread/start") {
-                rejectThreadReady?.(error);
-                resolveThreadReady = null;
-                rejectThreadReady = null;
-                return;
-              }
-              if (
-                pending?.method === "turn/start" &&
-                turnInFlight &&
-                !turnSettled
-              ) {
-                turnSettled = true;
-                turnInFlight = false;
-                turnId = null;
-                cleanupTurn();
-                rejectTurnDone?.(error);
-                resolveTurnDone = null;
-                rejectTurnDone = null;
-                return;
-              }
-              bus.emitApp({ type: "error", message: error.message });
-              return;
-            }
-          }
-          return;
-        }
-
-        if (isServerNotification(message)) {
-          if (message.method === "error") {
-            bus.emitApp({
-              type: "error",
-              message: `server: ${JSON.stringify(message.params)}`,
-            });
-            return;
-          }
-          if (message.method === "account/rateLimits/updated") {
-            return;
-          }
-        }
-      },
-
-      onProtocolError: async ({ error }) => {
-        cleanupTurn();
-        bus.emitApp({
-          type: "error",
-          message: `protocol: ${error.message}`,
-        });
-        rejectThreadReady?.(error);
-        rejectTurnDone?.(error);
-        bridge.stop();
-        process.exit(1);
-      },
-
-      onProcessExit: (code) => {
-        cleanupTurn();
-        if (turnInFlight && !turnSettled) {
-          const error = new Error(
-            `codex app-server exited unexpectedly (code=${String(code)})`,
-          );
-          rejectTurnDone?.(error);
-        }
-      },
-    },
-  );
-
-  function startFlow(): void {
-    bridge.start();
-
-    const initReq: ClientRequest = {
-      method: "initialize",
-      id: requestId(),
-      params: {
-        clientInfo: {
-          name: "codex_headless_cli",
-          title: "Codex Headless CLI",
-          version: "0.1.0",
-        },
-        capabilities: null,
-      },
-    };
-    const initialized: ClientNotification = { method: "initialized" };
     const threadStart: ClientRequest = {
       method: "thread/start",
-      id: requestId(),
+      id: this.requestId(),
       params: {
-        model: config.model ?? null,
+        model: this.config.model ?? null,
         cwd: process.cwd(),
-        approvalPolicy: toProtocolApprovalPolicy(config.approvalMode),
-        sandbox: toProtocolSandbox(config.sandbox),
+        approvalPolicy: toProtocolApprovalPolicy(this.config.approvalMode),
+        sandbox: toProtocolSandbox(this.config.sandbox),
         experimentalRawEvents: false,
       },
     };
+    this.sendMessage(threadStart, "thread/start");
 
-    sendMessage(initReq, "initialize");
-    sendMessage(initialized);
-    sendMessage(threadStart, "thread/start");
-  }
-
-  function waitForThreadStart(): Promise<string> {
-    if (threadId) {
-      return Promise.resolve(threadId);
-    }
-    startFlow();
     return new Promise<string>((resolve, reject) => {
-      resolveThreadReady = resolve;
-      rejectThreadReady = reject;
+      this.threadState = { status: "starting", resolve, reject };
     });
   }
 
-  function runTurn(text: string): Promise<void> {
-    if (!threadId) {
+  runTurn(text: string): Promise<void> {
+    if (this.threadState.status !== "ready") {
       throw new Error("Thread not ready.");
     }
-    if (turnInFlight) {
+    if (this.turnState.status === "active") {
       throw new Error(
         "A turn is already in progress. Wait for completion or use /interrupt.",
       );
     }
 
-    const activeThreadId = threadId;
-    turnInFlight = true;
-    turnSettled = false;
-    turnId = null;
-    assistantLineOpen = false;
-    commandOutputOpen = false;
-    gotFirstToken = false;
-    reasoningStarted = false;
-
-    bus.emitApp({ type: "waiting-start" });
+    const threadId = this.threadState.threadId;
+    this.emit({ type: "waiting-start" });
 
     return new Promise<void>((resolve, reject) => {
-      resolveTurnDone = resolve;
-      rejectTurnDone = reject;
+      this.turnState = {
+        status: "active",
+        turnId: null,
+        gotFirstToken: false,
+        assistantLineOpen: false,
+        commandOutputOpen: false,
+        reasoningStarted: false,
+        resolve,
+        reject,
+      };
 
       const turnStart: ClientRequest = {
         method: "turn/start",
-        id: requestId(),
+        id: this.requestId(),
         params: {
-          threadId: activeThreadId,
+          threadId,
           input: [{ type: "text", text, text_elements: [] }],
         },
       };
-      sendMessage(turnStart, "turn/start");
+      this.sendMessage(turnStart, "turn/start");
     });
   }
 
-  function interruptTurn(): void {
-    if (!threadId || !turnId || !turnInFlight) {
+  interruptTurn(): void {
+    if (
+      this.threadState.status !== "ready" ||
+      this.turnState.status !== "active" ||
+      !this.turnState.turnId
+    ) {
       return;
     }
     const interruptReq: ClientRequest = {
       method: "turn/interrupt",
-      id: requestId(),
-      params: { threadId, turnId },
+      id: this.requestId(),
+      params: {
+        threadId: this.threadState.threadId,
+        turnId: this.turnState.turnId,
+      },
     };
-    sendMessage(interruptReq, "turn/interrupt");
+    this.sendMessage(interruptReq, "turn/interrupt");
   }
 
-  function stop(): void {
-    if (stopped) return;
-    stopped = true;
-    bridge.stop();
+  stop(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.bridge.stop();
   }
 
-  return { bridge, waitForThreadStart, runTurn, interruptTurn, stop };
+  // ── Internals ────────────────────────────────────────────────────────────
+
+  private requestId(): number {
+    return this.nextId++;
+  }
+
+  private sendMessage(
+    message: ClientRequest | ClientNotification,
+    trackedMethod?: string,
+  ): void {
+    this.bridge.send(message);
+    if ("id" in message && typeof message.id === "number" && trackedMethod) {
+      this.pendingRequests.set(message.id, { method: trackedMethod });
+    }
+  }
+
+  private onFirstToken(): void {
+    if (this.turnState.status === "active" && !this.turnState.gotFirstToken) {
+      this.turnState.gotFirstToken = true;
+      this.emit({ type: "waiting-stop" });
+    }
+  }
+
+  /** Settle the current turn — emits turn-complete and resets turnState to idle. */
+  private settleTurn(outcome: "resolve" | "reject", error?: Error): void {
+    if (this.turnState.status !== "active") return;
+    const { resolve, reject } = this.turnState;
+    this.turnState = { status: "idle" };
+    this.emit({ type: "turn-complete" });
+    if (outcome === "resolve") {
+      resolve();
+    } else {
+      reject(error!);
+    }
+  }
+
+  private sendApprovalDecision(
+    kind: string,
+    approvalRequestId: number | string,
+    decision: "accept" | "decline",
+  ): void {
+    if (kind === "item/commandExecution/requestApproval") {
+      this.bridge.send(
+        buildCommandExecutionApprovalResponse(approvalRequestId, decision),
+      );
+    } else if (kind === "item/fileChange/requestApproval") {
+      this.bridge.send(
+        buildFileChangeApprovalResponse(approvalRequestId, decision),
+      );
+    }
+  }
+
+  // ── Event handlers ─────────────────────────────────────────────────────
+
+  private async handleEvent(event: { kind: string; threadId: string; turnId?: string; payloadJson: string }): Promise<void> {
+    // Thread started
+    if (event.kind === EventKind.ThreadStarted && this.threadState.status === "starting") {
+      const { resolve } = this.threadState;
+      this.threadState = { status: "ready", threadId: event.threadId };
+      this.emit({ type: "thread-ready", threadId: event.threadId });
+      resolve(event.threadId);
+      return;
+    }
+
+    // Turn started
+    if (
+      event.kind === EventKind.TurnStarted &&
+      event.turnId &&
+      this.turnState.status === "active" &&
+      this.turnState.turnId === null
+    ) {
+      this.turnState.turnId = event.turnId;
+      return;
+    }
+
+    // Reasoning deltas
+    if (REASONING_EVENT_KINDS.has(event.kind)) {
+      this.onFirstToken();
+
+      if (this.turnState.status === "active" && !this.turnState.reasoningStarted) {
+        this.turnState.reasoningStarted = true;
+      }
+
+      if (event.kind === EventKind.ReasoningSectionBreak) {
+        this.emit({ type: "reasoning-section-break" });
+        return;
+      }
+
+      const delta = extractDelta(event.payloadJson);
+      if (delta) {
+        this.emit({ type: "reasoning-delta", delta });
+      }
+      return;
+    }
+
+    // Assistant streaming delta
+    if (event.kind === EventKind.AgentMessageDelta) {
+      this.onFirstToken();
+
+      if (this.config.reasoningOnly) return;
+
+      const delta = extractDelta(event.payloadJson);
+      if (!delta) return;
+
+      if (this.turnState.status === "active" && !this.turnState.assistantLineOpen) {
+        this.turnState.assistantLineOpen = true;
+        if (this.config.debug) {
+          this.emit({ type: "debug-tag", tag: "response" });
+        }
+      }
+      this.emit({ type: "response-delta", delta });
+      return;
+    }
+
+    // Command execution output delta
+    if (event.kind === EventKind.CommandOutputDelta) {
+      this.onFirstToken();
+
+      const delta = extractDelta(event.payloadJson);
+      if (delta) {
+        if (this.config.debug && this.turnState.status === "active" && !this.turnState.commandOutputOpen) {
+          this.turnState.commandOutputOpen = true;
+          this.emit({ type: "debug-tag", tag: "command" });
+        }
+        this.emit({ type: "command-output-delta", delta });
+      }
+      return;
+    }
+
+    // Approval requests
+    if (APPROVAL_KINDS.has(event.kind)) {
+      this.onFirstToken();
+
+      const payload = parseApprovalPayload(event.payloadJson);
+      if (!payload) return;
+
+      await new Promise<void>((resolve) => {
+        this.emit({
+          type: "approval-request",
+          kind: event.kind,
+          payloadJson: event.payloadJson,
+          respond: (decision) => {
+            this.sendApprovalDecision(event.kind, payload.id, decision);
+            resolve();
+          },
+        });
+      });
+      return;
+    }
+
+    // Turn completed
+    if (event.kind === EventKind.TurnCompleted) {
+      this.settleTurn("resolve");
+      return;
+    }
+  }
+
+  private async handleGlobalMessage(message: unknown): Promise<void> {
+    if (isResponse(message)) {
+      if (typeof message.id === "number") {
+        const pending = this.pendingRequests.get(message.id);
+        this.pendingRequests.delete(message.id);
+        if (message.error) {
+          const error = new Error(
+            `Request failed (${pending?.method ?? "unknown"}): ${message.error.message} (${message.error.code})`,
+          );
+          if (pending?.method === "thread/start" && this.threadState.status === "starting") {
+            const { reject } = this.threadState;
+            this.threadState = { status: "init" };
+            reject(error);
+            return;
+          }
+          if (pending?.method === "turn/start") {
+            this.settleTurn("reject", error);
+            return;
+          }
+          this.emit({ type: "error", message: error.message });
+          return;
+        }
+      }
+      return;
+    }
+
+    if (isServerNotification(message)) {
+      if (message.method === "error") {
+        this.emit({
+          type: "error",
+          message: `server: ${JSON.stringify(message.params)}`,
+        });
+        return;
+      }
+      if (message.method === "account/rateLimits/updated") {
+        return;
+      }
+    }
+  }
+
+  private handleProtocolError(error: Error): void {
+    this.settleTurn("reject", error);
+    this.emit({
+      type: "error",
+      message: `protocol: ${error.message}`,
+    });
+    if (this.threadState.status === "starting") {
+      const { reject } = this.threadState;
+      this.threadState = { status: "init" };
+      reject(error);
+    }
+    this.bridge.stop();
+    process.exit(1);
+  }
+
+  private handleProcessExit(code: number | null): void {
+    if (this.turnState.status === "active") {
+      const error = new Error(
+        `codex app-server exited unexpectedly (code=${String(code)})`,
+      );
+      this.settleTurn("reject", error);
+    }
+  }
 }

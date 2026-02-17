@@ -1,6 +1,7 @@
 import { CodexLocalBridge } from "@zakstam/codex-local-component/host";
-import type { ClientNotification, ClientRequest } from "@zakstam/codex-local-component/protocol";
+import type { ClientRequest } from "@zakstam/codex-local-component/protocol";
 import { isResponse } from "./protocol.js";
+import { buildInitSequence } from "./bridge-init.js";
 
 type ModelInfo = {
   id: string;
@@ -104,21 +105,7 @@ export async function fetchAvailableModels(
 
     bridge.start();
 
-    // Initialize handshake
-    const initReq: ClientRequest = {
-      method: "initialize",
-      id: requestId(),
-      params: {
-        clientInfo: {
-          name: "codex_headless_cli",
-          title: "Codex Headless CLI",
-          version: "0.1.0",
-        },
-        capabilities: null,
-      },
-    };
-    const initialized: ClientNotification = { method: "initialized" };
-
+    const [initReq, initialized] = buildInitSequence(requestId);
     bridge.send(initReq);
     bridge.send(initialized);
 

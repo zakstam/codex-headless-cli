@@ -10,15 +10,22 @@ export type ApprovalPayload = {
 export function parseApprovalPayload(
   payloadJson: string,
 ): ApprovalPayload | null {
-  const msg = parseServerMessage(payloadJson) as Record<string, unknown>;
-  if (
-    !msg ||
-    typeof msg.id === "undefined" ||
-    typeof msg.method !== "string"
-  ) {
-    return null;
-  }
-  return msg as unknown as ApprovalPayload;
+  const msg = parseServerMessage(payloadJson);
+  if (typeof msg !== "object" || msg === null) return null;
+  const obj = msg as Record<string, unknown>;
+
+  const id = obj.id;
+  if (typeof id !== "number" && typeof id !== "string") return null;
+
+  const method = obj.method;
+  if (typeof method !== "string") return null;
+
+  const params =
+    typeof obj.params === "object" && obj.params !== null
+      ? (obj.params as Record<string, unknown>)
+      : undefined;
+
+  return { id, method, params };
 }
 
 function describeCommandApproval(params: Record<string, unknown>): string {

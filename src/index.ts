@@ -2,8 +2,7 @@
 
 import { execSync } from "node:child_process";
 import { loadConfig, createConfig } from "./config.js";
-import { runSingleShot } from "./single-shot.js";
-import { runRepl } from "./repl.js";
+import { run } from "./run.js";
 
 // Global error handlers — prevent silent crashes
 process.on("unhandledRejection", (reason) => {
@@ -75,11 +74,11 @@ async function main(): Promise<void> {
 2. Pick 3 files.
 3. For each file, determine if it is a text file or a binary file.
 4. Reason and Wait for 1 second on each step.`;
-    await runSingleShot(config, debugPrompt);
+    await run(config, { mode: "single-shot", query: debugPrompt });
   } else if (query) {
-    await runSingleShot(config, query);
+    await run(config, { mode: "single-shot", query });
   } else {
-    await runRepl(config);
+    await run(config, { mode: "repl" });
   }
 }
 

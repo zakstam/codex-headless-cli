@@ -3,8 +3,9 @@ import { highlight, supportsLanguage } from "cli-highlight";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-marked.use(markedTerminal() as any);
+// marked-terminal's return type doesn't match marked's MarkedExtension exactly,
+// but is structurally compatible at runtime.
+marked.use(markedTerminal() as unknown as import("marked").MarkedExtension);
 
 /**
  * Streaming markdown renderer for terminal output.
