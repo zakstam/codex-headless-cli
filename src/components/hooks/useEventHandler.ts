@@ -1,6 +1,5 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import { useApp } from "ink";
-import chalk from "chalk";
 import { BridgeSession } from "../../bridge.js";
 import type { AppEvent } from "../../bridge.js";
 import { MarkdownWriter } from "../../markdown.js";
@@ -57,6 +56,7 @@ export function useEventHandler(
 
         case "turn-complete":
           md.flush();
+          md.reset();
           dispatch(event);
           if (mode === "single-shot") {
             exit();
@@ -104,6 +104,7 @@ export function useEventHandler(
   useEffect(() => {
     session.waitForThreadStart().catch((err: Error) => {
       dispatch({ type: "error", message: `Connection failed: ${err.message}` });
+      dispatch({ type: "turn-complete" });
       if (mode === "single-shot") exit();
     });
   }, [session, mode, exit, dispatch]);

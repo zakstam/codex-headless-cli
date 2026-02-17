@@ -1,4 +1,3 @@
-import React from "react";
 import { Box, Text, Static } from "ink";
 import Spinner from "ink-spinner";
 import { ReasoningBar } from "./ReasoningBar.js";

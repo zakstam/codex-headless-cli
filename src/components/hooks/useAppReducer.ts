@@ -1,4 +1,4 @@
-import { useReducer } from "react";
+import { useMemo, useReducer } from "react";
 import chalk from "chalk";
 import type { AppEvent } from "../../bridge.js";
 import { describeApproval, parseApprovalPayload } from "../../approvals.js";
@@ -186,17 +186,10 @@ function createReducer(config: Config, mode: "repl" | "single-shot") {
 
       case "response-delta": {
         if (config.reasoningOnly) return state;
-
-        let next = state;
-        if (next.phase !== "streaming") {
-          if (config.debug) {
-            const items = addItem(next, chalk.bold.magenta("[response]"));
-            next = { ...next, ...items };
-          }
-          next = { ...next, phase: "streaming" };
+        if (state.phase !== "streaming") {
+          return { ...state, phase: "streaming" };
         }
-        // md-line and md-buffer actions handle actual content updates
-        return next;
+        return state;
       }
 
       case "md-line": {
@@ -333,5 +326,6 @@ const INITIAL_STATE: AppState = {
 };
 
 export function useAppReducer(config: Config, mode: "repl" | "single-shot") {
-  return useReducer(createReducer(config, mode), INITIAL_STATE);
+  const reducer = useMemo(() => createReducer(config, mode), [config, mode]);
+  return useReducer(reducer, INITIAL_STATE);
 }
