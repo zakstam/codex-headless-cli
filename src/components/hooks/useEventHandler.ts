@@ -40,6 +40,12 @@ export function useEventHandler(
           }
           break;
 
+        case "response-start":
+          md.flush();
+          md.reset();
+          dispatch(event);
+          break;
+
         case "response-delta":
           dispatch(event);
           if (!config.reasoningOnly) {

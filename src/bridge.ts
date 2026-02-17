@@ -27,6 +27,7 @@ export type AppEvent =
   | { type: "waiting-stop" }
   | { type: "reasoning-delta"; delta: string }
   | { type: "reasoning-section-break" }
+  | { type: "response-start" }
   | { type: "response-delta"; delta: string }
   | { type: "command-output-delta"; delta: string }
   | {
@@ -318,6 +319,8 @@ export class BridgeSession {
 
       if (this.turnState.status === "active" && !this.turnState.assistantLineOpen) {
         this.turnState.assistantLineOpen = true;
+        this.turnState.commandOutputOpen = false;
+        this.emit({ type: "response-start" });
         if (this.config.debug) {
           this.emit({ type: "debug-tag", tag: "response" });
         }
@@ -332,9 +335,12 @@ export class BridgeSession {
 
       const delta = extractDelta(event.payloadJson);
       if (delta) {
-        if (this.config.debug && this.turnState.status === "active" && !this.turnState.commandOutputOpen) {
-          this.turnState.commandOutputOpen = true;
-          this.emit({ type: "debug-tag", tag: "command" });
+        if (this.turnState.status === "active") {
+          this.turnState.assistantLineOpen = false;
+          if (this.config.debug && !this.turnState.commandOutputOpen) {
+            this.turnState.commandOutputOpen = true;
+            this.emit({ type: "debug-tag", tag: "command" });
+          }
         }
         this.emit({ type: "command-output-delta", delta });
       }
@@ -347,6 +353,10 @@ export class BridgeSession {
 
       const payload = parseApprovalPayload(event.payloadJson);
       if (!payload) return;
+
+      if (this.turnState.status === "active") {
+        this.turnState.assistantLineOpen = false;
+      }
 
       await new Promise<void>((resolve) => {
         this.emit({
@@ -366,6 +376,18 @@ export class BridgeSession {
     if (event.kind === EventKind.TurnCompleted) {
       this.settleTurn("resolve");
       return;
+    }
+
+    // item/completed marks the end of any protocol item (agent message,
+    // tool call, reasoning block, etc.).  When the current agent message
+    // item completes, reset assistantLineOpen so the next batch of
+    // AgentMessageDelta events is recognized as a new response segment.
+    if (
+      event.kind === "item/completed" &&
+      this.turnState.status === "active" &&
+      this.turnState.assistantLineOpen
+    ) {
+      this.turnState.assistantLineOpen = false;
     }
   }
 

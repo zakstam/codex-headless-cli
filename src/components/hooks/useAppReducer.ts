@@ -29,6 +29,7 @@ export type AppState = {
   needsReasoningHeader: boolean;
   approvalDetails: string;
   cmdBuffer: string;
+  responseSegment: number;
 };
 
 export type AppAction =
@@ -96,6 +97,7 @@ function createReducer(config: Config, mode: "repl" | "single-shot") {
           phase: "waiting",
           reasoningSection: 0,
           needsReasoningHeader: true,
+          responseSegment: 0,
         };
 
       case "waiting-stop":
@@ -182,6 +184,17 @@ function createReducer(config: Config, mode: "repl" | "single-shot") {
           };
         }
         return next;
+      }
+
+      case "response-start": {
+        if (config.reasoningOnly) return state;
+        const segment = state.responseSegment + 1;
+        if (segment > 1) {
+          // Visible separator between response segments
+          const items = addItem(state, chalk.dim("---"));
+          return { ...state, ...items, responseSegment: segment };
+        }
+        return { ...state, responseSegment: segment };
       }
 
       case "response-delta": {
@@ -323,6 +336,7 @@ const INITIAL_STATE: AppState = {
   needsReasoningHeader: true,
   approvalDetails: "",
   cmdBuffer: "",
+  responseSegment: 0,
 };
 
 export function useAppReducer(config: Config, mode: "repl" | "single-shot") {
