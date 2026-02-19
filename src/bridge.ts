@@ -8,11 +8,15 @@ import type {
   ClientRequest,
 } from "@zakstam/codex-local-component/protocol";
 import {
-  extractDelta,
+  extractAssistantDelta,
+  extractCommandOutputDelta,
+  extractReasoningEvent,
   EventKind,
-  REASONING_EVENT_KINDS,
-  APPROVAL_KINDS,
+  getLifecycleEventType,
+  isGlobalNoopNotification,
+  isApprovalKind,
   isResponse,
+  isServerErrorMethod,
   isServerNotification,
 } from "./protocol.js";
 import { parseApprovalPayload } from "./approvals.js";
@@ -254,11 +258,11 @@ export class BridgeSession {
     approvalRequestId: number | string,
     decision: "accept" | "decline",
   ): void {
-    if (kind === "item/commandExecution/requestApproval") {
+    if (kind === EventKind.CommandApproval) {
       this.bridge.send(
         buildCommandExecutionApprovalResponse(approvalRequestId, decision),
       );
-    } else if (kind === "item/fileChange/requestApproval") {
+    } else if (kind === EventKind.FileChangeApproval) {
       this.bridge.send(
         buildFileChangeApprovalResponse(approvalRequestId, decision),
       );
@@ -268,8 +272,10 @@ export class BridgeSession {
   // ── Event handlers ─────────────────────────────────────────────────────
 
   private async handleEvent(event: { kind: string; threadId: string; turnId?: string; payloadJson: string }): Promise<void> {
+    const lifecycle = getLifecycleEventType(event.kind);
+
     // Thread started
-    if (event.kind === EventKind.ThreadStarted && this.threadState.status === "starting") {
+    if (lifecycle === "thread-started" && this.threadState.status === "starting") {
       const { resolve } = this.threadState;
       this.threadState = { status: "ready", threadId: event.threadId };
       this.emit({ type: "thread-ready", threadId: event.threadId });
@@ -279,7 +285,7 @@ export class BridgeSession {
 
     // Turn started
     if (
-      event.kind === EventKind.TurnStarted &&
+      lifecycle === "turn-started" &&
       event.turnId &&
       this.turnState.status === "active" &&
       this.turnState.turnId === null
@@ -289,33 +295,29 @@ export class BridgeSession {
     }
 
     // Reasoning deltas
-    if (REASONING_EVENT_KINDS.has(event.kind)) {
+    const reasoningEvent = extractReasoningEvent(event.kind, event.payloadJson);
+    if (reasoningEvent) {
       this.onFirstToken();
 
       if (this.turnState.status === "active" && !this.turnState.reasoningStarted) {
         this.turnState.reasoningStarted = true;
       }
 
-      if (event.kind === EventKind.ReasoningSectionBreak) {
+      if (reasoningEvent.type === "section-break") {
         this.emit({ type: "reasoning-section-break" });
         return;
       }
 
-      const delta = extractDelta(event.payloadJson);
-      if (delta) {
-        this.emit({ type: "reasoning-delta", delta });
-      }
+      this.emit({ type: "reasoning-delta", delta: reasoningEvent.delta });
       return;
     }
 
     // Assistant streaming delta
-    if (event.kind === EventKind.AgentMessageDelta) {
+    const assistantDelta = extractAssistantDelta(event.kind, event.payloadJson);
+    if (assistantDelta) {
       this.onFirstToken();
 
       if (this.config.reasoningOnly) return;
-
-      const delta = extractDelta(event.payloadJson);
-      if (!delta) return;
 
       if (this.turnState.status === "active" && !this.turnState.assistantLineOpen) {
         this.turnState.assistantLineOpen = true;
@@ -325,30 +327,31 @@ export class BridgeSession {
           this.emit({ type: "debug-tag", tag: "response" });
         }
       }
-      this.emit({ type: "response-delta", delta });
+      this.emit({ type: "response-delta", delta: assistantDelta });
       return;
     }
 
     // Command execution output delta
-    if (event.kind === EventKind.CommandOutputDelta) {
+    const commandOutputDelta = extractCommandOutputDelta(
+      event.kind,
+      event.payloadJson,
+    );
+    if (commandOutputDelta) {
       this.onFirstToken();
 
-      const delta = extractDelta(event.payloadJson);
-      if (delta) {
-        if (this.turnState.status === "active") {
-          this.turnState.assistantLineOpen = false;
-          if (this.config.debug && !this.turnState.commandOutputOpen) {
-            this.turnState.commandOutputOpen = true;
-            this.emit({ type: "debug-tag", tag: "command" });
-          }
+      if (this.turnState.status === "active") {
+        this.turnState.assistantLineOpen = false;
+        if (this.config.debug && !this.turnState.commandOutputOpen) {
+          this.turnState.commandOutputOpen = true;
+          this.emit({ type: "debug-tag", tag: "command" });
         }
-        this.emit({ type: "command-output-delta", delta });
       }
+      this.emit({ type: "command-output-delta", delta: commandOutputDelta });
       return;
     }
 
     // Approval requests
-    if (APPROVAL_KINDS.has(event.kind)) {
+    if (isApprovalKind(event.kind)) {
       this.onFirstToken();
 
       const payload = parseApprovalPayload(event.payloadJson);
@@ -373,7 +376,7 @@ export class BridgeSession {
     }
 
     // Turn completed
-    if (event.kind === EventKind.TurnCompleted) {
+    if (lifecycle === "turn-completed") {
       this.settleTurn("resolve");
       return;
     }
@@ -383,7 +386,7 @@ export class BridgeSession {
     // item completes, reset assistantLineOpen so the next batch of
     // AgentMessageDelta events is recognized as a new response segment.
     if (
-      event.kind === "item/completed" &&
+      lifecycle === "item-completed" &&
       this.turnState.status === "active" &&
       this.turnState.assistantLineOpen
     ) {
@@ -418,14 +421,14 @@ export class BridgeSession {
     }
 
     if (isServerNotification(message)) {
-      if (message.method === "error") {
+      if (isServerErrorMethod(message.method)) {
         this.emit({
           type: "error",
           message: `server: ${JSON.stringify(message.params)}`,
         });
         return;
       }
-      if (message.method === "account/rateLimits/updated") {
+      if (isGlobalNoopNotification(message.method)) {
         return;
       }
     }

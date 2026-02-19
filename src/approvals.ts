@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { parseServerMessage } from "./protocol.js";
+import { EventKind, parseServerMessage } from "./protocol.js";
 
 export type ApprovalPayload = {
   id: number | string;
@@ -62,10 +62,10 @@ function describeFileChangeApproval(params: Record<string, unknown>): string {
 
 export function describeApproval(payload: ApprovalPayload): string {
   const params = payload.params ?? {};
-  if (payload.method === "item/commandExecution/requestApproval") {
+  if (payload.method === EventKind.CommandApproval) {
     return describeCommandApproval(params);
   }
-  if (payload.method === "item/fileChange/requestApproval") {
+  if (payload.method === EventKind.FileChangeApproval) {
     return describeFileChangeApproval(params);
   }
   return `Unknown approval: ${payload.method}`;

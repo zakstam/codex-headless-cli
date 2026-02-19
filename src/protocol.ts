@@ -1,6 +1,10 @@
+import {
+  durableMessageDeltaForPayload,
+  reasoningDeltaForPayload,
+} from "@zakstam/codex-local-component/protocol";
+
 /**
  * Protocol helpers for parsing codex app-server JSON-RPC messages.
- * Reimplemented locally since the monorepo's apps/shared/ is not published.
  */
 
 type ProtocolNotification = {
@@ -35,28 +39,11 @@ export function isResponse(message: unknown): message is ProtocolResponse {
   return "id" in message && !isServerNotification(message);
 }
 
-/**
- * Generic delta extractor — pulls `params.delta` from any JSON-RPC payload.
- * Use this after already matching on `event.kind` in the bridge, so we don't
- * need per-method extraction functions.
- */
-export function extractDelta(payloadJson: string): string | null {
-  const msg = parseServerMessage(payloadJson) as Record<string, unknown>;
-  const params =
-    typeof msg?.params === "object" && msg.params !== null
-      ? (msg.params as Record<string, unknown>)
-      : null;
-  return typeof params?.delta === "string" ? params.delta : null;
-}
-
-// ---------------------------------------------------------------------------
-// Event kind constants — single source of truth for protocol path strings
-// ---------------------------------------------------------------------------
-
 export const EventKind = {
   ThreadStarted: "thread/started",
   TurnStarted: "turn/started",
   TurnCompleted: "turn/completed",
+  ItemCompleted: "item/completed",
 
   AgentMessageDelta: "item/agentMessage/delta",
 
@@ -67,15 +54,89 @@ export const EventKind = {
   CommandOutputDelta: "item/commandExecution/outputDelta",
   CommandApproval: "item/commandExecution/requestApproval",
   FileChangeApproval: "item/fileChange/requestApproval",
+
+  ServerError: "error",
+  AccountRateLimitsUpdated: "account/rateLimits/updated",
 } as const;
 
-export const REASONING_EVENT_KINDS: Set<string> = new Set([
-  EventKind.ReasoningSummaryDelta,
-  EventKind.ReasoningSectionBreak,
-  EventKind.ReasoningRawDelta,
-]);
+export type LifecycleEventType =
+  | "thread-started"
+  | "turn-started"
+  | "turn-completed"
+  | "item-completed";
 
-export const APPROVAL_KINDS: Set<string> = new Set([
-  EventKind.CommandApproval,
-  EventKind.FileChangeApproval,
-]);
+export function getLifecycleEventType(kind: string): LifecycleEventType | null {
+  switch (kind) {
+    case EventKind.ThreadStarted:
+      return "thread-started";
+    case EventKind.TurnStarted:
+      return "turn-started";
+    case EventKind.TurnCompleted:
+      return "turn-completed";
+    case EventKind.ItemCompleted:
+      return "item-completed";
+    default:
+      return null;
+  }
+}
+
+export function isServerErrorMethod(method: string): boolean {
+  return method === EventKind.ServerError;
+}
+
+export function isGlobalNoopNotification(method: string): boolean {
+  return method === EventKind.AccountRateLimitsUpdated;
+}
+
+export type ReasoningEvent =
+  | { type: "delta"; delta: string }
+  | { type: "section-break" };
+
+export function extractReasoningEvent(
+  kind: string,
+  payloadJson: string,
+): ReasoningEvent | null {
+  const reasoning = reasoningDeltaForPayload(kind, payloadJson);
+  if (!reasoning) {
+    return null;
+  }
+  if (reasoning.segmentType === "sectionBreak") {
+    return { type: "section-break" };
+  }
+  if (typeof reasoning.delta !== "string" || reasoning.delta.length === 0) {
+    return null;
+  }
+  return { type: "delta", delta: reasoning.delta };
+}
+
+export function extractAssistantDelta(
+  kind: string,
+  payloadJson: string,
+): string | null {
+  const delta = durableMessageDeltaForPayload(kind, payloadJson)?.delta;
+  return typeof delta === "string" && delta.length > 0 ? delta : null;
+}
+
+export function extractCommandOutputDelta(
+  kind: string,
+  payloadJson: string,
+): string | null {
+  if (kind !== EventKind.CommandOutputDelta) {
+    return null;
+  }
+  const msg = parseServerMessage(payloadJson) as Record<string, unknown> | null;
+  if (!msg || msg.method !== EventKind.CommandOutputDelta) {
+    return null;
+  }
+  const params =
+    typeof msg.params === "object" && msg.params !== null
+      ? (msg.params as Record<string, unknown>)
+      : null;
+  return typeof params?.delta === "string" && params.delta.length > 0
+    ? params.delta
+    : null;
+}
+
+export function isApprovalKind(kind: string): boolean {
+  return kind === EventKind.CommandApproval || kind === EventKind.FileChangeApproval;
+}
