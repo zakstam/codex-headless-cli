@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@zakstam/codex-local-component':
-        specifier: ^0.19.0
-        version: 0.19.0(@types/react@19.2.14)(react@19.2.4)
+        specifier: ^0.19.1
+        version: 0.19.1(@types/react@19.2.14)(react@19.2.4)
       chalk:
         specifier: ^5.6.2
         version: 5.6.2
@@ -507,8 +507,8 @@ packages:
   '@types/react@19.2.14':
     resolution: {integrity: sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==}
 
-  '@zakstam/codex-local-component@0.19.0':
-    resolution: {integrity: sha512-CaKihvzL//7yIcc87MHwpch11UBbBTvKyMKHbeG0Ye8Ke2BPvef2hexkTJujbrTFbzxcPx8rbL8GzoOTWTGlOA==}
+  '@zakstam/codex-local-component@0.19.1':
+    resolution: {integrity: sha512-+0zQL+i4jRG6iK32dAJkyX4vVkTKn/bFkXJ+BehS8YkVUIgiY8dNAoylZ4pXD35AawbPMPeOe9tQ9h/cfu9QvQ==}
     peerDependencies:
       '@types/react': ^18.0.0 || ^19.0.0
       react: ^18.0.0 || ^19.0.0
@@ -1253,7 +1253,7 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@zakstam/codex-local-component@0.19.0(@types/react@19.2.14)(react@19.2.4)':
+  '@zakstam/codex-local-component@0.19.1(@types/react@19.2.14)(react@19.2.4)':
     dependencies:
       ajv: 8.18.0
       convex: 1.32.0(react@19.2.4)
